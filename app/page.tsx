@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { buildSegments } from "./audio";
+import { buildSegments, blobToDataUri } from "./audio";
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -21,21 +21,52 @@ interface Progress {
   total: number;
 }
 
-async function transcribeBlob(
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+class FatalError extends Error {}
+
+// Transcribe one segment with retry + exponential backoff. Throws FatalError
+// for non-retryable problems (e.g. quota/auth) so the whole job aborts; throws
+// a plain Error only after retries are exhausted (caller degrades gracefully).
+async function transcribeSegment(
   blob: Blob,
   language: string,
-  context: string
+  context: string,
+  attempts = 4
 ): Promise<string> {
-  const fd = new FormData();
-  fd.append("audio", blob, "segment.wav");
-  fd.append("language", language);
-  fd.append("context", context);
-  const resp = await fetch("/api/transcribe", { method: "POST", body: fd });
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || data?.error) {
-    throw new Error(data?.error || `轉寫失敗 (${resp.status})`);
+  const dataUri = await blobToDataUri(blob);
+  const qs =
+    `?language=${encodeURIComponent(language)}` +
+    `&context=${encodeURIComponent(context.slice(0, 800))}`;
+  let lastErr = "辨識失敗";
+
+  for (let a = 0; a < attempts; a++) {
+    if (a > 0) await sleep(Math.min(8000, 600 * 2 ** (a - 1)) + Math.random() * 400);
+    let resp: Response;
+    try {
+      resp = await fetch(`/api/transcribe${qs}`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: dataUri,
+      });
+    } catch {
+      lastErr = "網絡中斷";
+      continue; // network error → retry
+    }
+
+    if (resp.ok) {
+      const data = await resp.json().catch(() => ({} as any));
+      if (data?.error) throw new FatalError(data.error); // e.g. empty / quota
+      return (data.text as string) || "";
+    }
+
+    const data = await resp.json().catch(() => null);
+    lastErr = data?.error || `伺服器回應 ${resp.status}`;
+    if (!RETRYABLE.has(resp.status)) throw new FatalError(lastErr);
+    // retryable (503/429/5xx) → loop and try again
   }
-  return (data.text as string) || "";
+  throw new Error(lastErr);
 }
 
 export default function Page() {
@@ -52,6 +83,7 @@ export default function Page() {
   const [over, setOver] = useState<boolean>(false);
   const [toast, setToast] = useState<string>("");
   const inputRef = useRef<HTMLInputElement | null>(null);
+
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -103,7 +135,7 @@ export default function Page() {
       } catch (decodeErr: any) {
         // Fallback: browser can't decode this codec — send the raw file as one piece.
         setStage("無法分段，嘗試整檔辨識…");
-        const text = await transcribeBlob(file, language, context);
+        const text = await transcribeSegment(file, language, context);
         setTranscript(text);
         if (!text) setError("辨識結果為空，請檢查錄音內容。");
         return;
@@ -113,17 +145,32 @@ export default function Page() {
       setProgress({ done: 0, total });
 
       const parts: string[] = [];
+      const failed: number[] = [];
       for (let i = 0; i < total; i++) {
         setStage(total > 1 ? `辨識緊第 ${i + 1} / ${total} 段…` : "辨識緊…");
-        const text = await transcribeBlob(segments[i].blob, language, context);
-        if (text) parts.push(text.trim());
+        try {
+          const text = await transcribeSegment(segments[i].blob, language, context);
+          if (text) parts.push(text.trim());
+        } catch (segErr: any) {
+          if (segErr instanceof FatalError) throw segErr; // quota/auth → abort all
+          // Transient failure after retries: keep going, mark this segment.
+          failed.push(i + 1);
+          parts.push(`【⚠️ 第 ${i + 1} 段未能辨識，可稍後再試】`);
+        }
         setProgress({ done: i + 1, total });
         setTranscript(parts.join("\n")); // stream partial result
+        if (i < total - 1) await sleep(350); // gentle pacing between segments
       }
 
       const finalText = parts.join("\n").trim();
       setTranscript(finalText);
-      if (!finalText) setError("辨識結果為空，請檢查錄音內容。");
+      if (failed.length) {
+        setError(
+          `共 ${total} 段，有 ${failed.length} 段辨識失敗（第 ${failed.join("、")} 段），其餘已完成。可稍後再撳一次「開始轉逐字稿」重試。`
+        );
+      } else if (!finalText) {
+        setError("辨識結果為空，請檢查錄音內容。");
+      }
     } catch (e: any) {
       setError(e?.message || "處理失敗，請再試。");
     } finally {

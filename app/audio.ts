@@ -148,3 +148,18 @@ export async function buildSegments(file: File): Promise<Segment[]> {
   }
   return segments;
 }
+
+/**
+ * Convert a Blob to a base64 `data:` URI on the client. We do this in the
+ * browser (not the worker) because base64-encoding multi-MB audio in a
+ * Cloudflare edge function exceeds its CPU limit (error 1102 → HTTP 503).
+ */
+export function blobToDataUri(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ""));
+    fr.onerror = () => reject(new Error("讀取音頻段失敗"));
+    fr.readAsDataURL(blob);
+  });
+}
+

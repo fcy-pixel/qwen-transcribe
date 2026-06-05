@@ -55,6 +55,48 @@ function extractText(data: any): string {
   return "";
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+
+// Read the audio data URI + options from either the low-CPU raw path
+// (text/plain body = data URI, options in query) or a multipart form
+// (used by curl/tests, or as a whole-file fallback).
+async function readInput(req: Request): Promise<{
+  dataUri: string;
+  language: string;
+  context: string;
+}> {
+  const ct = req.headers.get("content-type") || "";
+  if (ct.includes("multipart/form-data")) {
+    const form = await req.formData();
+    const provided = form.get("audioDataUri");
+    const language = String(form.get("language") || "auto");
+    const context = String(form.get("context") || "").trim();
+    if (typeof provided === "string" && provided) {
+      return { dataUri: provided, language, context };
+    }
+    const file = form.get("audio");
+    if (file instanceof File) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const mime = guessMime(file.name, file.type);
+      return {
+        dataUri: `data:${mime};base64,${base64FromBytes(bytes)}`,
+        language,
+        context,
+      };
+    }
+    return { dataUri: "", language, context };
+  }
+  // Low-CPU path: raw body is the data URI; options come from the query string.
+  const url = new URL(req.url);
+  const dataUri = (await req.text()).trim();
+  return {
+    dataUri,
+    language: url.searchParams.get("language") || "auto",
+    context: (url.searchParams.get("context") || "").trim(),
+  };
+}
+
 export async function POST(req: Request): Promise<Response> {
   try {
     const apiKey = process.env.DASHSCOPE_API_KEY;
@@ -68,22 +110,18 @@ export async function POST(req: Request): Promise<Response> {
       );
     }
 
-    const form = await req.formData();
-    const file = form.get("audio");
-    const language = String(form.get("language") || "auto");
-    const context = String(form.get("context") || "").trim();
+    const { dataUri, language, context } = await readInput(req);
 
-    if (!(file instanceof File)) {
-      return json({ error: "冇收到音頻檔案。" }, 400);
+    if (!dataUri || !dataUri.startsWith("data:") || !dataUri.includes(";base64,")) {
+      return json({ error: "冇收到有效嘅音頻資料。" }, 400);
     }
-
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    if (bytes.length === 0) {
-      return json({ error: "音頻檔案是空的。" }, 400);
+    // ~9.5MB raw → reject early (client should have segmented it).
+    if (dataUri.length > 13_500_000) {
+      return json(
+        { error: "音頻段太大，請縮短或等系統自動分段。", code: "TooLarge" },
+        413
+      );
     }
-
-    const mime = guessMime(file.name, file.type);
-    const dataUri = `data:${mime};base64,${base64FromBytes(bytes)}`;
 
     const asrOptions: Record<string, unknown> = {
       enable_lid: true,
@@ -93,25 +131,48 @@ export async function POST(req: Request): Promise<Response> {
       asrOptions.language = language;
     }
 
-    const body = {
-      model: "qwen3-asr-flash",
-      input: {
-        messages: [
-          { role: "system", content: [{ text: context }] },
-          { role: "user", content: [{ audio: dataUri }] },
-        ],
-      },
-      parameters: { asr_options: asrOptions },
-    };
+    // Assemble the request body by string concat so we never run JSON.stringify
+    // over the multi-MB base64 audio (that CPU cost triggered Cloudflare 1102).
+    // The data URI alphabet (data:<mime>;base64,[A-Za-z0-9+/=]) needs no JSON
+    // escaping, so direct injection is safe. Only the user-supplied text fields
+    // are escaped via JSON.stringify.
+    const bodyStr =
+      '{"model":"qwen3-asr-flash","input":{"messages":[' +
+      '{"role":"system","content":[{"text":' +
+      JSON.stringify(context || "") +
+      "}]}," +
+      '{"role":"user","content":[{"audio":"' +
+      dataUri +
+      '"}]}' +
+      ']},"parameters":' +
+      JSON.stringify({ asr_options: asrOptions }) +
+      "}";
 
-    const resp = await fetch(DASHSCOPE_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
+    let resp: Response | null = null;
+    let lastErr = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await sleep(500 * attempt);
+      try {
+        resp = await fetch(DASHSCOPE_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: bodyStr,
+        });
+      } catch (e: any) {
+        lastErr = e?.message || "上游連線失敗";
+        resp = null;
+        continue; // network blip → retry
+      }
+      if (resp.ok || !RETRYABLE.has(resp.status)) break; // done or non-retryable
+      lastErr = `ASR 服務暫時不可用 (${resp.status})`;
+    }
+
+    if (!resp) {
+      return json({ error: lastErr || "無法連接 ASR 服務。", code: "Upstream" }, 503);
+    }
 
     const data: any = await resp.json().catch(() => ({}));
 
