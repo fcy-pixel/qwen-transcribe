@@ -1,0 +1,3 @@
+# Copy this file to `.dev.vars` for local development (it is git-ignored).
+# Get / rotate your key in the Alibaba Cloud Model Studio console.
+DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
