@@ -1,3 +1,5 @@
+import { guardRequest } from "@/lib/auth";
+
 export const runtime = "edge";
 
 const DASHSCOPE_URL =
@@ -99,6 +101,10 @@ async function readInput(req: Request): Promise<{
 
 export async function POST(req: Request): Promise<Response> {
   try {
+    // Reject unauthenticated callers (no-op when SESSION_SECRET is unset).
+    const denied = await guardRequest(req);
+    if (denied) return denied;
+
     const apiKey = process.env.DASHSCOPE_API_KEY;
     if (!apiKey) {
       return json(

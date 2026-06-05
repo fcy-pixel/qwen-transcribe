@@ -44,6 +44,22 @@ body {
   margin-bottom: 28px;
 }
 
+.header .school-logo {
+  width: 72px;
+  height: auto;
+  display: block;
+  margin: 0 auto 10px;
+  filter: drop-shadow(0 6px 16px rgba(2, 6, 23, 0.45));
+}
+
+.header .school-name {
+  font-size: 17px;
+  font-weight: 700;
+  color: #f1f5f9;
+  letter-spacing: 1px;
+  margin-bottom: 12px;
+}
+
 .header h1 {
   font-size: 30px;
   margin: 0 0 8px;

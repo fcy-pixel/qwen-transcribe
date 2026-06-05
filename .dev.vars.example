@@ -1,3 +1,12 @@
-# Copy this file to `.dev.vars` for local development (it is git-ignored).
-# Get / rotate your key in the Alibaba Cloud Model Studio console.
+# Copy this file to `.dev.vars` (and `.env.local`) for local development — both are git-ignored.
+
+# Qwen3-ASR-Flash key — get / rotate it in the Alibaba Cloud Model Studio console.
 DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Google 登入 (限 @keitsz.edu.hk)。Client ID 為公開值，可直接填。
+NEXT_PUBLIC_GOOGLE_CLIENT_ID=623198168089-oht8mb2d4pi444g4imks1ncn1sdgkg44.apps.googleusercontent.com
+
+# 伺服器 session 簽章密鑰（任意長隨機字串）。設定後 /api/transcribe 會強制登入；
+# 留空則停用強制（任何人可呼叫 API）。產生方法：
+#   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+SESSION_SECRET=please-change-to-a-long-random-string

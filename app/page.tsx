@@ -225,6 +225,9 @@ export default function Page() {
   return (
     <div className="wrap">
       <div className="header">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img className="school-logo" src="/logo.png" alt="中華基督教會基慈小學校徽" />
+        <div className="school-name">中華基督教會基慈小學</div>
         <div className="badge">Qwen3-ASR-Flash</div>
         <h1>錄音轉逐字稿</h1>
         <p>上載課堂或會議錄音，AI 自動轉成逐字稿（支援中文、粵語、英文）</p>
