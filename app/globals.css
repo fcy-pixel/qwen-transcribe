@@ -249,6 +249,34 @@ button:disabled {
   }
 }
 
+.progress {
+  margin-top: 16px;
+  background: #eef2ff;
+  border-radius: 999px;
+  height: 26px;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #e0e7ff;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--brand), var(--brand2));
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
 .alert {
   margin-top: 18px;
   border-radius: 12px;

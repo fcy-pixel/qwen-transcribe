@@ -6,6 +6,8 @@
 ## 功能
 
 - 拖放／揀選音頻檔（mp3 / wav / m4a / aac / flac / ogg 等）
+- **長錄音自動分段**：喺瀏覽器將錄音解碼→16kHz 單聲道→按靜音位切成約 2 分鐘一段，逐段辨識再拼合，唔受單次約 3 分鐘 / 10MB 上限限制（整堂課都得）
+- 處理時顯示進度（第幾段 / 共幾段），逐字稿即時逐段顯示
 - 語言：自動偵測（含粵語）/ 中文 / English
 - 選填「專有名詞／背景」做 context 提示，提高準確度
 - 逐字稿可即場編輯、複製、下載 `.txt`
@@ -49,3 +51,15 @@ npm run deploy
 - 音頻以 `data:<mime>;base64,...` 內嵌方式傳送
 - `parameters.asr_options`：`enable_lid`（語言偵測）、`enable_itn`（數字正規化）、`language`（可選）
 - 回傳逐字稿位置：`output.choices[0].message.content[0].text`
+
+## 分段機制（長錄音）
+
+qwen3-asr-flash 單次請求有大小／時長上限（實測約 5.77 分鐘 / 10.5MB 會回 `400 file size too large`，約 2.5 分鐘 / 4.6MB 正常）。為支援長錄音，前端（[app/audio.ts](app/audio.ts)）會：
+
+1. 用 Web Audio `decodeAudioData` 解碼任何瀏覽器支援嘅格式
+2. 降為單聲道並線性重採樣到 16kHz
+3. 以 20ms 視窗計算能量，喺每約 120 秒邊界±8 秒內揀**最靜**嗰點切段（避免切斷字詞）
+4. 每段編碼成 16-bit WAV，順序送去 `/api/transcribe`
+5. 將各段逐字稿用換行拼合
+
+若瀏覽器解唔到該格式，會自動退回「整檔辨識」（適用於短檔）。
