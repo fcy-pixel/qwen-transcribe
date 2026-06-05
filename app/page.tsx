@@ -244,7 +244,7 @@ export default function Page() {
           >
             <div className="big">📁 拖放錄音檔案到呢度，或者撳一下揀檔案</div>
             <div className="small">
-              支援 mp3 / wav / m4a / aac / flac / ogg 等 · 長錄音會自動分段，唔受 3 分鐘限制
+              支援 mp3 / wav / m4a / aac / flac / ogg 等 · 長錄音會自動分段
             </div>
           </div>
         ) : (
