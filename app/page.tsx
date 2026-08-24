@@ -23,6 +23,7 @@ interface Progress {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504]);
+const ASR_CONCURRENCY = 2;
 
 class FatalError extends Error {}
 
@@ -191,33 +192,64 @@ export default function Page() {
       const total = segments.length;
       setProgress({ done: 0, total });
 
-      const parts: string[] = [];
+      const parts: Array<string | undefined> = new Array(total);
       const failed: number[] = [];
-      for (let i = 0; i < total; i++) {
+      let nextIndex = 0;
+      let completed = 0;
+      let stopped = false;
+      let fatalError: FatalError | null = null;
+
+      const updateVisibleProgress = () => {
+        completed += 1;
+        setProgress({ done: completed, total });
         setStage(
           total > 1
-            ? `Fun-ASR 辨識緊第 ${i + 1} / ${total} 段…`
+            ? `Fun-ASR 兩段並行辨識中 · 已完成 ${completed} / ${total} 段…`
             : "Fun-ASR 辨識緊…"
         );
-        try {
-          const text = await transcribeSegment(segments[i].blob, language, context);
-          if (text) parts.push(text.trim());
-        } catch (segErr: any) {
-          if (segErr instanceof FatalError) throw segErr; // quota/auth → abort all
-          // Transient failure after retries: keep going, mark this segment.
-          failed.push(i + 1);
-          parts.push(`【⚠️ 第 ${i + 1} 段未能辨識，可稍後再試】`);
-        }
-        setProgress({ done: i + 1, total });
-        setTranscript(parts.join("\n")); // stream partial result
-        if (i < total - 1) await sleep(350); // gentle pacing between segments
-      }
 
-      const rawText = parts.join("\n").trim();
+        // A later segment can finish first. Only reveal the longest completed
+        // prefix so the live transcript always remains in recording order.
+        let ready = 0;
+        while (ready < total && parts[ready] !== undefined) ready += 1;
+        setTranscript(parts.slice(0, ready).join("\n"));
+      };
+
+      const runWorker = async () => {
+        while (!stopped) {
+          const i = nextIndex;
+          nextIndex += 1;
+          if (i >= total) return;
+
+          try {
+            const text = await transcribeSegment(segments[i].blob, language, context);
+            parts[i] = text.trim();
+          } catch (segErr: any) {
+            if (segErr instanceof FatalError) {
+              fatalError = segErr;
+              stopped = true;
+              return;
+            }
+            // Transient failure after retries: keep going, mark this segment.
+            failed.push(i + 1);
+            parts[i] = `【⚠️ 第 ${i + 1} 段未能辨識，可稍後再試】`;
+          }
+          updateVisibleProgress();
+        }
+      };
+
+      setStage(total > 1 ? "Fun-ASR 兩段並行辨識中…" : "Fun-ASR 辨識緊…");
+      await Promise.all(
+        Array.from({ length: Math.min(ASR_CONCURRENCY, total) }, () => runWorker())
+      );
+      if (fatalError) throw fatalError;
+
+      const rawText = parts.map((part) => part || "").join("\n").trim();
       const finalText = await finishWithQwen(rawText);
       setTranscript(finalText);
       const warnings: string[] = [];
       if (failed.length) {
+        failed.sort((a, b) => a - b);
         warnings.push(
           `共 ${total} 段，有 ${failed.length} 段辨識失敗（第 ${failed.join("、")} 段），其餘已完成。可稍後再撳一次「開始轉逐字稿」重試。`
         );
