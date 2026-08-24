@@ -4,6 +4,7 @@ export const runtime = "edge";
 
 const DASHSCOPE_URL =
   "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+const FUN_ASR_MODEL = "fun-asr-flash-2026-06-15";
 
 function json(obj: unknown, status = 200): Response {
   return new Response(JSON.stringify(obj), {
@@ -23,12 +24,10 @@ function guessMime(name: string, fallback: string): string {
     flac: "audio/flac",
     ogg: "audio/ogg",
     oga: "audio/ogg",
-    opus: "audio/ogg",
+    opus: "audio/opus",
     amr: "audio/amr",
     wma: "audio/x-ms-wma",
     webm: "audio/webm",
-    aiff: "audio/aiff",
-    aif: "audio/aiff",
   };
   return map[ext] || fallback || "audio/mpeg";
 }
@@ -44,16 +43,48 @@ function base64FromBytes(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function extractText(data: any): string {
-  const content = data?.output?.choices?.[0]?.message?.content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c: any) => (typeof c?.text === "string" ? c.text : ""))
-      .join("")
-      .trim();
+function audioFormat(dataUri: string): string {
+  const mime = dataUri.slice(5, dataUri.indexOf(";base64,")).toLowerCase();
+  const formats: Record<string, string> = {
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "m4a",
+    "video/mp4": "mp4",
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+    "audio/ogg": "ogg",
+    "audio/opus": "opus",
+    "audio/amr": "amr",
+    "audio/webm": "webm",
+    "video/webm": "webm",
+    "audio/x-ms-wma": "wma",
+  };
+  return formats[mime] || "wav";
+}
+
+function languageHint(language: string): string {
+  if (language === "yue" || language === "zh") {
+    return "主要語言：香港粵語；請保留錄音中的英文詞語。";
   }
-  if (typeof content === "string") return content.trim();
-  if (typeof data?.output?.text === "string") return data.output.text.trim();
+  if (language === "en") return "Primary language: English.";
+  return "語言：自動辨識，可能包含香港粵語、中文及英文。";
+}
+
+function extractText(data: any): string {
+  // The dedicated Fun-ASR-Flash response differs slightly between the generic
+  // and workspace-specific DashScope endpoints, so accept both documented
+  // shapes. Both contain the same cumulative transcript.
+  const candidates = [
+    data?.output?.text,
+    data?.output?.output?.text,
+    data?.output?.output?.sentence?.text,
+    data?.output?.sentence?.text,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
   return "";
 }
 
@@ -61,8 +92,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const RETRYABLE = new Set([429, 500, 502, 503, 504]);
 
 // Read the audio data URI + options from either the low-CPU raw path
-// (text/plain body = data URI, options in query) or a multipart form
-// (used by curl/tests, or as a whole-file fallback).
+// (text/plain body = data URI, options in query) or a multipart form.
 async function readInput(req: Request): Promise<{
   dataUri: string;
   language: string;
@@ -89,7 +119,7 @@ async function readInput(req: Request): Promise<{
     }
     return { dataUri: "", language, context };
   }
-  // Low-CPU path: raw body is the data URI; options come from the query string.
+
   const url = new URL(req.url);
   const dataUri = (await req.text()).trim();
   return {
@@ -101,7 +131,6 @@ async function readInput(req: Request): Promise<{
 
 export async function POST(req: Request): Promise<Response> {
   try {
-    // Reject unauthenticated callers (no-op when SESSION_SECRET is unset).
     const denied = await guardRequest(req);
     if (denied) return denied;
 
@@ -121,7 +150,8 @@ export async function POST(req: Request): Promise<Response> {
     if (!dataUri || !dataUri.startsWith("data:") || !dataUri.includes(";base64,")) {
       return json({ error: "冇收到有效嘅音頻資料。" }, 400);
     }
-    // ~9.5MB raw → reject early (client should have segmented it).
+    // Fun-ASR's Base64 request limit is 10 MB. The browser normally sends a
+    // two-minute 16 kHz WAV segment, safely below this guard.
     if (dataUri.length > 13_500_000) {
       return json(
         { error: "音頻段太大，請縮短或等系統自動分段。", code: "TooLarge" },
@@ -129,30 +159,28 @@ export async function POST(req: Request): Promise<Response> {
       );
     }
 
-    const asrOptions: Record<string, unknown> = {
-      enable_lid: true,
-      enable_itn: true,
-    };
-    if (language && language !== "auto") {
-      asrOptions.language = language;
-    }
+    const contextText = [languageHint(language), context]
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 400);
+    const contextMessage = contextText
+      ? '{"role":"user","content":[{"type":"input_text","text":' +
+        JSON.stringify(contextText) +
+        "}]},"
+      : "";
 
-    // Assemble the request body by string concat so we never run JSON.stringify
-    // over the multi-MB base64 audio (that CPU cost triggered Cloudflare 1102).
-    // The data URI alphabet (data:<mime>;base64,[A-Za-z0-9+/=]) needs no JSON
-    // escaping, so direct injection is safe. Only the user-supplied text fields
-    // are escaped via JSON.stringify.
+    // Avoid JSON.stringify over the multi-MB base64 payload. Only the small
+    // user-provided context is stringified; the Data URI alphabet is JSON-safe.
     const bodyStr =
-      '{"model":"qwen3-asr-flash","input":{"messages":[' +
-      '{"role":"system","content":[{"text":' +
-      JSON.stringify(context || "") +
-      "}]}," +
-      '{"role":"user","content":[{"audio":"' +
+      '{"model":' +
+      JSON.stringify(FUN_ASR_MODEL) +
+      ',"input":{"messages":[' +
+      contextMessage +
+      '{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"' +
       dataUri +
-      '"}]}' +
-      ']},"parameters":' +
-      JSON.stringify({ asr_options: asrOptions }) +
-      "}";
+      '"}}]}]},"parameters":{"format":' +
+      JSON.stringify(audioFormat(dataUri)) +
+      "}}";
 
     let resp: Response | null = null;
     let lastErr = "";
@@ -164,30 +192,32 @@ export async function POST(req: Request): Promise<Response> {
           headers: {
             Authorization: `Bearer ${apiKey}`,
             "Content-Type": "application/json",
+            "X-DashScope-SSE": "disable",
           },
           body: bodyStr,
         });
       } catch (e: any) {
         lastErr = e?.message || "上游連線失敗";
         resp = null;
-        continue; // network blip → retry
+        continue;
       }
-      if (resp.ok || !RETRYABLE.has(resp.status)) break; // done or non-retryable
-      lastErr = `ASR 服務暫時不可用 (${resp.status})`;
+      if (resp.ok || !RETRYABLE.has(resp.status)) break;
+      lastErr = `Fun-ASR 服務暫時不可用 (${resp.status})`;
     }
 
     if (!resp) {
-      return json({ error: lastErr || "無法連接 ASR 服務。", code: "Upstream" }, 503);
+      return json({ error: lastErr || "無法連接 Fun-ASR 服務。", code: "Upstream" }, 503);
     }
 
     const data: any = await resp.json().catch(() => ({}));
 
     if (!resp.ok) {
-      const code = data?.code || "";
-      let message = data?.message || `ASR 服務回傳錯誤 (${resp.status})`;
+      const code = data?.code || data?.output?.code || "";
+      let message =
+        data?.message || data?.output?.message || `Fun-ASR 服務回傳錯誤 (${resp.status})`;
       if (code === "AllocationQuota.FreeTierOnly") {
         message =
-          "Qwen3-ASR-Flash 免費額度已用完。請喺 Alibaba Cloud Model Studio 後台關閉「只用免費額度 / use free tier only」模式，開啟付費使用後再試。";
+          "Fun-ASR 免費額度已用完。請喺 Alibaba Cloud Model Studio 後台關閉「只用免費額度 / use free tier only」模式，開啟付費使用後再試。";
       }
       return json({ error: message, code }, resp.status);
     }
@@ -200,7 +230,11 @@ export async function POST(req: Request): Promise<Response> {
       );
     }
 
-    return json({ text, requestId: data?.request_id || null });
+    return json({
+      text,
+      model: FUN_ASR_MODEL,
+      requestId: data?.request_id || data?.output?.request_id || null,
+    });
   } catch (e: any) {
     return json({ error: e?.message || "伺服器發生未知錯誤。" }, 500);
   }

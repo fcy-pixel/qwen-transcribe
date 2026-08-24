@@ -69,12 +69,45 @@ async function transcribeSegment(
   throw new Error(lastErr);
 }
 
+// Fun-ASR returns the literal transcript. This second, text-only pass asks
+// Qwen to normalize Traditional Chinese, punctuation, and paragraph breaks
+// without summarizing or inventing speaker identities.
+async function formatTranscript(
+  transcript: string,
+  language: string,
+  context: string,
+  attempts = 3
+): Promise<string> {
+  let lastErr = "Qwen 整理失敗";
+  for (let a = 0; a < attempts; a++) {
+    if (a > 0) await sleep(Math.min(5000, 500 * 2 ** (a - 1)));
+    let resp: Response;
+    try {
+      resp = await fetch("/api/format", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transcript, language, context }),
+      });
+    } catch {
+      lastErr = "網絡中斷";
+      continue;
+    }
+
+    const data = await resp.json().catch(() => ({} as any));
+    if (resp.ok && data?.text) return String(data.text).trim();
+    lastErr = data?.error || `伺服器回應 ${resp.status}`;
+    if (!RETRYABLE.has(resp.status)) break;
+  }
+  throw new Error(lastErr);
+}
+
 export default function Page() {
   const [file, setFile] = useState<File | null>(null);
   const [audioUrl, setAudioUrl] = useState<string>("");
   const [duration, setDuration] = useState<number>(0);
   const [language, setLanguage] = useState<string>("auto");
   const [context, setContext] = useState<string>("");
+  const [organizeWithQwen, setOrganizeWithQwen] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(false);
   const [stage, setStage] = useState<string>("");
   const [progress, setProgress] = useState<Progress | null>(null);
@@ -128,16 +161,30 @@ export default function Page() {
     setProgress(null);
     setStage("正在分析錄音…（解碼 / 分段）");
 
+    let qwenWarning = "";
+    const finishWithQwen = async (rawText: string): Promise<string> => {
+      if (!organizeWithQwen || !rawText) return rawText;
+      setStage("Fun-ASR 辨識完成，Qwen 正在整理繁體、標點和分段…");
+      try {
+        return await formatTranscript(rawText, language, context);
+      } catch (formatErr: any) {
+        qwenWarning = `Qwen 整理暫時失敗（${formatErr?.message || "未知錯誤"}），已保留 Fun-ASR 原始逐字稿。`;
+        return rawText;
+      }
+    };
+
     try {
       let segments;
       try {
         segments = await buildSegments(file);
       } catch (decodeErr: any) {
         // Fallback: browser can't decode this codec — send the raw file as one piece.
-        setStage("無法分段，嘗試整檔辨識…");
-        const text = await transcribeSegment(file, language, context);
+        setStage("無法分段，嘗試由 Fun-ASR 整檔辨識…");
+        const rawText = await transcribeSegment(file, language, context);
+        const text = await finishWithQwen(rawText);
         setTranscript(text);
         if (!text) setError("辨識結果為空，請檢查錄音內容。");
+        else if (qwenWarning) setError(qwenWarning);
         return;
       }
 
@@ -147,7 +194,11 @@ export default function Page() {
       const parts: string[] = [];
       const failed: number[] = [];
       for (let i = 0; i < total; i++) {
-        setStage(total > 1 ? `辨識緊第 ${i + 1} / ${total} 段…` : "辨識緊…");
+        setStage(
+          total > 1
+            ? `Fun-ASR 辨識緊第 ${i + 1} / ${total} 段…`
+            : "Fun-ASR 辨識緊…"
+        );
         try {
           const text = await transcribeSegment(segments[i].blob, language, context);
           if (text) parts.push(text.trim());
@@ -162,15 +213,19 @@ export default function Page() {
         if (i < total - 1) await sleep(350); // gentle pacing between segments
       }
 
-      const finalText = parts.join("\n").trim();
+      const rawText = parts.join("\n").trim();
+      const finalText = await finishWithQwen(rawText);
       setTranscript(finalText);
+      const warnings: string[] = [];
       if (failed.length) {
-        setError(
+        warnings.push(
           `共 ${total} 段，有 ${failed.length} 段辨識失敗（第 ${failed.join("、")} 段），其餘已完成。可稍後再撳一次「開始轉逐字稿」重試。`
         );
       } else if (!finalText) {
-        setError("辨識結果為空，請檢查錄音內容。");
+        warnings.push("辨識結果為空，請檢查錄音內容。");
       }
+      if (qwenWarning) warnings.push(qwenWarning);
+      if (warnings.length) setError(warnings.join("\n"));
     } catch (e: any) {
       setError(e?.message || "處理失敗，請再試。");
     } finally {
@@ -178,7 +233,7 @@ export default function Page() {
       setStage("");
       setProgress(null);
     }
-  }, [file, language, context, loading]);
+  }, [file, language, context, organizeWithQwen, loading]);
 
   const copyText = useCallback(async () => {
     if (!transcript) return;
@@ -228,9 +283,9 @@ export default function Page() {
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img className="school-logo" src="/logo.png" alt="中華基督教會基慈小學校徽" />
         <div className="school-name">中華基督教會基慈小學</div>
-        <div className="badge">Qwen3-ASR-Flash</div>
+        <div className="badge">Fun-ASR + Qwen3.5</div>
         <h1>錄音轉逐字稿</h1>
-        <p>上載課堂或會議錄音，AI 自動轉成逐字稿（支援中文、粵語、英文）</p>
+        <p>Fun-ASR 辨識粵語，再由 Qwen 整理繁體、標點和分段</p>
       </div>
 
       <div className="card">
@@ -289,7 +344,7 @@ export default function Page() {
                   disabled={loading}
                 >
                   <option value="auto">自動偵測（含粵語）</option>
-                  <option value="zh">中文 / 粵語</option>
+                  <option value="yue">香港粵語 / 中文</option>
                   <option value="en">English</option>
                 </select>
               </div>
@@ -302,6 +357,23 @@ export default function Page() {
                   disabled={loading}
                 />
               </div>
+            </div>
+
+            <label className="pipeline-option">
+              <input
+                type="checkbox"
+                checked={organizeWithQwen}
+                onChange={(e) => setOrganizeWithQwen(e.target.checked)}
+                disabled={loading}
+              />
+              <span>
+                <strong>完成後由 Qwen 整理</strong>
+                <small>只整理繁體、標點和分段，不會摘要或自行加入內容</small>
+              </span>
+            </label>
+
+            <div className="alert note compact">
+              ℹ️ 現階段使用 Fun-ASR-Flash 安全直送錄音，不會公開儲存；此模式未提供說話人分離。
             </div>
 
             <div className="actions">
@@ -368,7 +440,7 @@ export default function Page() {
       </div>
 
       <div className="footer">
-        由 Qwen3-ASR-Flash 提供辨識 · 長錄音於瀏覽器自動分段 · 結果僅供參考，請自行核對
+        Fun-ASR-Flash 粵語辨識 · Qwen3.5 逐字稿整理 · 長錄音於瀏覽器自動分段 · 結果請自行核對
       </div>
 
       {toast ? <div className="toast">{toast}</div> : null}

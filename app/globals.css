@@ -201,6 +201,38 @@ textarea {
   margin-top: 6px;
 }
 
+.pipeline-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 13px 14px;
+  border: 1px solid #c7d2fe;
+  border-radius: 12px;
+  background: #eef2ff;
+  color: #312e81;
+  cursor: pointer;
+}
+
+.pipeline-option input {
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--brand);
+  flex: 0 0 auto;
+}
+
+.pipeline-option span {
+  display: grid;
+  gap: 3px;
+}
+
+.pipeline-option small {
+  color: #6366f1;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .actions {
   display: flex;
   gap: 12px;
@@ -311,6 +343,12 @@ button:disabled {
   background: #fffbeb;
   border: 1px solid #fde68a;
   color: #92400e;
+}
+
+.alert.compact {
+  margin-top: 12px;
+  padding: 10px 12px;
+  font-size: 12px;
 }
 
 .result {

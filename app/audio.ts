@@ -1,5 +1,5 @@
 // Client-side audio utilities: decode → mono 16kHz → silence-aware chunking → WAV.
-// qwen3-asr-flash rejects large/long inputs, so we split long recordings into
+// Fun-ASR-Flash rejects Base64 inputs over 5 minutes / 10 MB, so we split recordings into
 // ~2-minute segments and transcribe each one, then stitch the results.
 
 export const TARGET_SR = 16000;
@@ -162,4 +162,3 @@ export function blobToDataUri(blob: Blob): Promise<string> {
     fr.readAsDataURL(blob);
   });
 }
-
